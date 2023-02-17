@@ -1,0 +1,238 @@
+---
+title: "PROSPECT logistic regression for urine loss - 2 years"
+author: "Dr. Rianne Fijten"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+library(classifierplots)
+library(caret)
+library(ROCR)
+library(pROC)
+
+library(pdp)
+library(dplyr)
+library(mlbench)
+
+library(caret)
+library(randomForest)
+
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/hajar.hasannejadasl/Documents/prospect2022/")
+scriptsLocations = paste(getwd(), "/scripts/", sep = "")
+source("scripts/importAllHandmadeFunctions.R")
+importAllHandmadeFunctions(scriptsLocations)
+
+#Build 1-year prediction model for urine loss with logistic regression
+
+#load data
+allData2years <- readRDS("data/allData2years")
+
+
+```
+
+# build 2-year prediction models for urine loss
+
+
+```{r, create datasets}
+trainingSet = allData2years[[1]]
+trainingSet = trainingSet[,1:38]
+
+testSet = allData2years[[2]]
+testSet = testSet[,1:38]
+``` 
+
+
+Before we start, we'll first remove the variables related to hot flashes and sensitive breasts as these are not to be included upon request by collaborators.
+
+```{r}
+trainingSet = trainingSet[,-grep("epic26_22_opvliegers1", names(trainingSet))]
+trainingSet = trainingSet[,-grep("epic26_23_gevoeligeborsten1", names(trainingSet))]
+
+testSet = testSet[,-grep("epic26_22_opvliegers1", names(testSet))]
+testSet = testSet[,-grep("epic26_23_gevoeligeborsten1", names(testSet))]
+```
+
+First we recreate the training and test set with only the input variables and the outcome we want, in this case *"epic26_1_urineverlies3". We'll also remove the outcome data that we're not interested in right now from the training and test set.
+
+```{r, select outcomes}
+outcomeTraining = allData2years[[1]]$epic26_1_urineverlies3
+outcomeTest = allData2years[[2]]$epic26_1_urineverlies3
+```
+
+Then we'll visualize the distributions of this outcome for the training set to decide how to transform it into a binary classification. For this outcome, the numbers are reversed, with 5 being no urine loss and 1 being the most severe form of urine loss.
+
+```{r, pie charts}
+pTraining = createPieChart(outcomeTraining, "Incontinence urine loss in training set")
+pTest = createPieChart(outcomeTest, "Incontinence urine loss in test set")
+
+multiplot(pTraining, pTest, cols = 2)
+```
+There are no missing values in our outcome, so we don't have to remove any additional samples.
+
+Since 5 (no problems) was answered by 63% of patients after 2 years in the training set, we have a distribution of 3/2, which should be doable.
+
+```{r, distribution treatment + urge answers}
+adjacencyList = createAdjacencyList(cbind(trainingSet$treatments, outcomeTraining))
+
+nodeNames = c("Prostatectomy", "EBRT", "Brachy", "Active surveillance", "MEER DAN 1X PER DAG", "ONGEVEER 1X PER DAG", "MEER DAN 1X PER WEEK", "ONGEVEER 1X PER WEEK", "ZELDEN OF NOOIT")
+createSankeyDiagram(adjacencyList, nodeNames)
+```
+
+This figure shows that prostatectomy causes urine loss in varying degrees in >75% of the time. The other treatments mostly result in no problems related to urine loss.
+
+Now we'll make our binary dataset
+```{r, binary outcome}
+binaryOutcomeTraining = createBinaryDataset(outcomeTraining, 5, seq(from = 1, to = 4))
+binaryOutcomeTest = createBinaryDataset(outcomeTest, 5, seq(from = 1, to = 4))
+
+pTrainingBinary = createPieChart(binaryOutcomeTraining, "Urine loss in training set")
+pTestBinary = createPieChart(binaryOutcomeTest, "Urine loss in test set")
+
+multiplot(pTrainingBinary, pTestBinary, cols = 2)
+
+```
+
+There appears to be a 2/3 to 1/3 partition in our binary dataset. This could cause problems with skewed sensitivy and specificity. But let's try it anyway.
+
+## Recursive Feature Elimination
+Before going on to other methods, if necessary, we'll first explore logistic regression with recursive feature elimination. We'll save this RFE logit model to a file since re-running the RFE will yield (slightly) different results each time. *(The creation of the RFE logit model and its saving have  been commented out for the purpose of creating the Knitted RMarkdown file and a load is added instead.)*
+
+```{r, rfe logistic regression}
+# glmProfile = performLogitRfe(trainingSet, binaryOutcomeTraining)
+# saveRDS(glmProfile, "models/rfeResults_Incontinence_Urineloss_2years_noHotFlashesSensBreasts.rds")
+glmProfile = readRDS("C:/Users/hajar.hasannejadasl/Documents/prospect2022/models/rfeResults_Incontinence_Urineloss_2years_noHotFlashesSensBreasts.rds")
+plot(glmProfile, type=c("g", "o"))
+
+```
+
+Let's see which model works best based on the variable importance by RFE. 
+
+```{r}
+varImportance = calculateVariableImportance(glmProfile)
+allLogitModels = reduceVariablesLogit(trainingSet, binaryOutcomeTraining, varImportance)
+{plot(rev(allLogitModels[[2]]$numberOfVariables), rev(allLogitModels[[2]]$AUC), ylim = c(0, 1), pch = 16)
+  points(rev(allLogitModels[[2]]$numberOfVariables), rev(allLogitModels[[2]]$sensitivity), col = "red",  pch = 16)
+  points(rev(allLogitModels[[2]]$numberOfVariables), rev(allLogitModels[[2]]$specificity), col =  "blue",  pch = 16)
+  points(rev(allLogitModels[[2]]$numberOfVariables), rev(allLogitModels[[2]]$overallAccuracy), col = "green",  pch = 16)
+  abline(v=12, col = "red")
+  legend("bottomright", legend = c("AUC", "sensitivity", "specificity", "overall accuracy"), col = c("black", "red", "blue", "green"), pch = 16)}
+```
+
+This figure clearly shows that none of the models have high enough sensitivity to even make the cut. 
+Let's see if upsampling makes a difference. 
+
+# Prediction after Upsampling of the smaller dataset
+
+To correct for the imbalance problem, we will need to perform upsampling as to balance the dataset. Then we'll run RFE again
+
+## Upsampling on class 2 (patients with problems)
+
+```{r, SMOTE upsampling}
+library(smotefamily)
+trainingSet2 <- data.frame(cbind(trainingSet,binaryOutcomeTraining))
+trainingSet2$binaryOutcomeTraining <- as.factor(trainingSet2$binaryOutcomeTraining)
+smote <- smotefamily::SMOTE(trainingSet2[,-which(colnames(trainingSet2) == "binaryOutcomeTraining")], trainingSet2$binaryOutcomeTraining, K=5, dup_size = 1)
+datasmote=smote$data
+SMOTE2BinaryOutcomeTraining = (datasmote[,c(37)])
+SMOTE2TrainingSet = datasmote[,-c(37)]
+createPieChart(datasmote$class, "Urine loss in upsampled training set")
+``` 
+
+The ADASYN function has generated 175 new synthetic samples. The dataset is now almost fully balanced.
+
+## Recursive feature elimination
+
+```{r, upsampled rfe logit regiression}
+#SMOTE2glmProfileUpsampled = performLogitRfe(SMOTE2TrainingSet, SMOTE2BinaryOutcomeTraining)
+#saveRDS(SMOTE2glmProfileUpsampled, "models/rfeResults_Incontinence_Urineloss_2year_upsampled_noHotFlashesSensBreastsSMOTE2.rds")
+SMOTE2glmProfileUpsampled = readRDS("C:/Users/hajar.hasannejadasl/Documents/prospect2022/models/rfeResults_Incontinence_Urineloss_2year_upsampled_noHotFlashesSensBreastsSMOTE2.rds")
+
+plot(SMOTE2glmProfileUpsampled, type=c("g", "o"))
+```
+
+Now let's again use the variable importance to determine which model works best. 
+
+```{r}
+varImportance = calculateVariableImportance(SMOTE2glmProfileUpsampled)
+allLogitModels = reduceVariablesLogit(SMOTE2TrainingSet, SMOTE2BinaryOutcomeTraining, varImportance)
+{plot(rev(allLogitModels[[2]]$numberOfVariables), rev(allLogitModels[[2]]$AUC), ylim = c(0, 1), pch = 16)
+  points(rev(allLogitModels[[2]]$numberOfVariables), rev(allLogitModels[[2]]$sensitivity), col = "red",  pch = 16)
+  points(rev(allLogitModels[[2]]$numberOfVariables), rev(allLogitModels[[2]]$specificity), col =  "blue",  pch = 16)
+  points(rev(allLogitModels[[2]]$numberOfVariables), rev(allLogitModels[[2]]$overallAccuracy), col = "green",  pch = 16)
+  abline(v=12, col = "red")
+  legend("bottomright", legend = c("AUC", "sensitivity", "specificity", "overall accuracy"), col = c("black", "red", "blue", "green"), pch = 16)}
+```
+```{r}
+allLogitModels[[2]]
+```
+This model is not great, because the specificity is lower than 60% in the training set. But the one with the best accuracy >=12 is the one with 12, so let's see what the accuracy is for that one. 
+
+The coefficients are:
+
+```{r}
+# chosenModel = 10
+# SMOTE2glmProfile = allLogitModels[[1]][[dim(trainingSet)[2] + 1 - chosenModel]]
+# saveRDS(SMOTE2glmProfile, "C:/Users/hajar.hasannejadasl/Documents/prospect2022/models/rfeResults_Incontinence_Urineloss_2year_upsampled2_individual_noHotFlashesSensBreastsSMOTE2.rds")
+SMOTE2glmProfile = readRDS("C:/Users/hajar.hasannejadasl/Documents/prospect2022/models/rfeResults_Incontinence_Urineloss_2year_upsampled2_individual_noHotFlashesSensBreastsSMOTE2.rds")
+SMOTE2glmProfile$coefficients
+
+
+
+
+```
+
+Now we want know how this model performs on our training set first.
+
+```{r, calculate accuracy on upsampled training set }
+trainingAccuracy = calculateAccuracy(SMOTE2glmProfile, SMOTE2BinaryOutcomeTraining)
+trainingAccuracy[[1]] # sensitivity/specificity
+trainingAccuracy[[2]] # confusionMatrix
+createROCCurve(SMOTE2glmProfile, SMOTE2BinaryOutcomeTraining)
+```
+
+The specificity is not great and pushes down the overall accuracy.
+
+```{r, calculate accyracy on test set upsampled model}
+testAccuracy = calculateAccuracy(SMOTE2glmProfile, binaryOutcomeTest, testSet)
+testAccuracy[[1]] # sensitivity/specificity
+testAccuracy[[2]] # confusionMatrix
+createROCCurve(SMOTE2glmProfile, binaryOutcomeTest, testSet)
+
+test_prob = predict(SMOTE2glmProfile, testSet, type = "response")
+
+```
+
+The model falls apart with the test set. This model is no good.
+
+#Important variables
+```{r}
+
+SMOTE2glmProfile$coefficients
+
+
+coef<-data.frame(SMOTE2glmProfile$coefficients)
+
+coef <- tibble::rownames_to_column(coef,"Feature")
+
+coef$importance<-abs(coef$SMOTE2glmProfile.coefficients)
+coef<-coef[2:nrow(coef),]
+
+
+coef<- coef[order(coef$importance, decreasing = TRUE),]
+coef$name<-c("Hormone Therapy", "Urinary control","IFBM", "Bloody stool","Body weight change", "Treatment", "Bowel habits", "Adult diaper", "Diabetes")
+
+ggplot(data = coef, 
+       aes(x = reorder(name, importance), y = importance, fill = "#1A5276")) +
+   coord_flip() +
+  geom_bar(stat="identity", fill="#1A5276") + labs(x = "Features", y = "Variable Importance") + 
+  geom_text(aes(label = round(importance,3)), vjust=0, hjust=0, color="black", size=3) + 
+  theme_bw() + theme(legend.position = "none")
+
+
+
+
+
+```
+

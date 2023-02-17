@@ -1,0 +1,221 @@
+---
+title: "SVM for urine loss 2-year"
+author: "Hajar Hasannejadasl"
+date: "2022-09-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(classifierplots)
+library(caret)
+
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/hajar.hasannejadasl/Documents/prospect2022/")
+scriptsLocations = paste(getwd(), "/scripts/", sep = "")
+source("scripts/importAllHandmadeFunctions.R")
+importAllHandmadeFunctions(scriptsLocations)
+
+#Build 1-year prediction model for urine loss with SVM
+
+#load data
+allData2years <- readRDS("data/allData2years")
+
+
+```
+
+
+```{r} 
+
+training= data.frame(allData2years[1])
+training=training[,1:38]
+test= data.frame(allData2years[2])
+test=test[,1:38]
+
+```
+Before we start, we’ll first remove the variables related to hot flashes and sensitive breasts as these are not to be included upon request by collaborators.
+```{r}
+
+training = training[,-grep("epic26_22_opvliegers1", names(training))]
+training = training[,-grep("epic26_23_gevoeligeborsten1", names(training))]
+
+test = test[,-grep("epic26_22_opvliegers1", names(test))]
+test = test[,-grep("epic26_23_gevoeligeborsten1", names(test))]
+
+```
+First we recreate the training and test set with only the input variables and the outcome we want, in this case *“epic26_1_urineverlies2”. We’ll also remove the outcome data that we’re not interested in right now from the training and test set.
+
+
+```{r}
+outcomeTraining = allData2years[[1]]$epic26_1_urineverlies3
+outcomeTest = allData2years[[2]]$epic26_1_urineverlies3
+```
+
+Now we’ll make our binary data set
+
+
+```{r}
+
+#convert to binary
+BinaryoutcomeTest<-ifelse(outcomeTest<5, "1","0")
+BinaryoutcomeTraining<-ifelse(outcomeTraining<5, "1","0")
+
+#convert to factor
+BinaryoutcomeTraining=as.numeric(BinaryoutcomeTraining)
+BinaryoutcomeTest=as.factor(BinaryoutcomeTest)
+
+```
+
+Prediction after Upsampling of the smaller dataset
+Upsampling on class 2 (patients with problems) on train data
+
+
+```{r}
+
+#Upsampling
+
+library(smotefamily)
+trainingSet2 <- data.frame(cbind(training,BinaryoutcomeTraining))
+trainingSet2$BinaryoutcomeTraining <- as.factor(trainingSet2$BinaryoutcomeTraining)
+smote <- smotefamily::SMOTE(trainingSet2[,-which(colnames(trainingSet2) == "BinaryoutcomeTraining")], trainingSet2$BinaryoutcomeTraining, K=5, dup_size = 1)
+datasmote=smote$data
+table(datasmote$class)
+
+SMOTE2BinaryOutcomeTraining = (datasmote[,c(37)])
+SMOTE2OutcomeTraining = (datasmote[,c(37)])
+
+SMOTE2TrainingSet = datasmote[,-c(37)]
+SMOTE2BinaryOutcomeTraining<-as.factor(SMOTE2BinaryOutcomeTraining)
+SMOTE2OutcomeTraining<-as.factor(SMOTE2BinaryOutcomeTraining)
+
+```
+The SMOTE function has generated 214 syntheic data. The dataset is now almost fully balanced.
+
+#Recursive feature elimination
+
+```{r}
+levels(SMOTE2BinaryOutcomeTraining) <- c("firstclass", "secondclass")
+
+# svmProfile_linear <- rfe(SMOTE2TrainingSet, SMOTE2BinaryOutcomeTraining,
+#                      sizes = c(2:36),
+#                      rfeControl = rfeControl(functions = caretFuncs,
+#                                             number = 5),
+# 
+#                     method = "svmLinear", metric = "Accuracy")
+# 
+# 
+#  saveRDS(svmProfile_linear, "C:/Users/hajar.hasannejadasl/Documents/prospect2022/models/SVMProfile-UI-2year.rds")
+svmProfile_linear = readRDS("C:/Users/hajar.hasannejadasl/Documents/prospect2022/models/SVMProfile-UI-2year.rds")
+```
+We’ll now run SVM models based on the variable importance retrieved by RFE.
+
+```{r}
+
+varImportance = calculateVariableImportance(svmProfile_linear)
+
+```
+
+```{r, analysis, message=FALSE, results='markup'}
+  allSVMModels = reduceVariablesLogit(SMOTE2TrainingSet, SMOTE2BinaryOutcomeTraining, varImportance)
+```
+
+```{r}
+
+  {plot(rev(allSVMModels[[2]]$numberOfVariables), rev(allSVMModels[[2]]$AUC), ylim = c(0, 1), pch = 16)
+    points(rev(allSVMModels[[2]]$numberOfVariables), rev(allSVMModels[[2]]$sensitivity), col = "red",  pch = 16)
+    points(rev(allSVMModels[[2]]$numberOfVariables), rev(allSVMModels[[2]]$specificity), col =  "blue",  pch = 16)
+    points(rev(allSVMModels[[2]]$numberOfVariables), rev(allSVMModels[[2]]$overallAccuracy), col = "green",  pch = 16)
+    abline(v=12, col = "red")
+    legend("bottomright", legend = c("AUC", "sensitivity", "specificity", "overall accuracy"), col = c("black", "red", "blue", "green"), pch = 16)}
+
+```
+```{r}
+#Checking the performance metrics
+allSVMModels[2]
+
+```
+We chose the model with 9 variables. 
+
+
+```{r}
+
+ #ChosenModel
+ chosenmodelvariables<-svmProfile_linear$optVariables[1:9]
+ chosenmodelvariables
+
+```
+Now we want know how this model performs on our training set first.
+
+```{r}
+
+ newdataset<-SMOTE2TrainingSet[c(chosenmodelvariables)]
+ #train with chosen variables
+ set.seed(350)
+ # Fit the model 
+ combined<-cbind(newdataset,SMOTE2BinaryOutcomeTraining)
+
+
+ # model_svmRFE<- train(SMOTE2BinaryOutcomeTraining ~ ., data = combined,
+ #                           method = "svmLinear",
+ #                           preProcess = c("center", "scale"),
+ #                           trControl = trainControl(method = "boot", number = 25, classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE))
+# saveRDS(model_svmRFE, "C:/Users/hajar.hasannejadasl/Documents/prospect2022/models/model_svmRFE-2year.rds")
+
+
+model_svmRFE = readRDS("C:/Users/hajar.hasannejadasl/Documents/prospect2022/models/model_svmRFE-2year.rds")
+
+#Confusion matrix for train data
+ predict_svmRFE_train<- predict(model_svmRFE, newdata = combined,na.action = na.pass)
+ confusionMatrix(table(predict_svmRFE_train, SMOTE2BinaryOutcomeTraining))
+
+```
+
+
+```{r}
+
+#ROC plot
+ train_prob = predict(model_svmRFE, SMOTE2TrainingSet, type = "prob")
+ roc_svm_one <- roc(SMOTE2BinaryOutcomeTraining, as.vector(train_prob[,1]))
+ plot(roc_svm_one, col = "black",lty = 1,cex.lab=1.5, cex.axis=1.5, lwd = 3, print.auc=TRUE)
+
+#calibration plot
+calibration_plot(SMOTE2OutcomeTraining, as.vector(train_prob[,1]))
+
+
+```
+```{r}
+# Linear SVM Performance Evaluation in test set
+testcombine<- cbind(test,BinaryoutcomeTest)
+testcombine$BinaryoutcomeTest<-as.factor(testcombine$BinaryoutcomeTest)
+levels(testcombine$BinaryoutcomeTest) <- c("firstclass", "secondclass")
+
+predict_svmRFE_test <- predict(model_svmRFE, newdata = testcombine,na.action = na.pass)
+confusionMatrix(table(predict_svmRFE_test, testcombine$BinaryoutcomeTest))
+
+```
+```{r}
+test_probSVM = predict(model_svmRFE, testcombine, type = "prob")
+roc_svm_one <- roc(BinaryoutcomeTest, as.vector(test_probSVM[,1]))
+plot(roc_svm_one, col = "black",lty = 1,cex.lab=1.5, cex.axis=1.5, lwd = 3, print.auc=TRUE)
+
+```
+Important Variables
+```{r}
+
+imp <- (varImp(svmProfile_linear))
+
+imp$Overall<-round(imp$Overall*100, digit=2)
+
+varimp_data <- data.frame(feature = row.names(imp),
+                          importance = imp$Overall)
+varimp_data2<-data.frame(varimp_data[1:9,])
+#rename rows to English
+varimp_data2$feature2 <- c("Treatments","sCT","Leaking urine", "Urinary control", "Urinary function", "Urinate frequency","Urine loss", "Gleason group", "sCN")
+ggplot(data = varimp_data2, 
+       aes(x = reorder(feature2, importance), y = importance, fill = "#7D3C98")) +
+   coord_flip() +
+  geom_bar(stat="identity", fill="#7D3C98") + labs(x = "Features", y = "Variable Importance") + 
+  geom_text(aes(label = round(importance,2)), vjust=0, hjust=0, color="black", size=3) + 
+  theme_bw() + theme(legend.position = "none")
+
+
+```

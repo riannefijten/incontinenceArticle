@@ -1,0 +1,203 @@
+---
+title: "UIRF_RFE-2-year"
+author: "Hajar"
+date: '2022-08-02'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(classifierplots)
+library(caret)
+library(ROCR)
+library(pROC)
+
+library(pdp)
+library(dplyr)
+library(mlbench)
+
+library(caret)
+library(randomForest)
+
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/hajar.hasannejadasl/Documents/prospect2022/")
+scriptsLocations = paste(getwd(), "/scripts/", sep = "")
+source("scripts/importAllHandmadeFunctions.R")
+importAllHandmadeFunctions(scriptsLocations)
+
+#Build 1-year prediction model for urine loss with random forest
+
+#load data
+allData2years <- readRDS("data/allData2years")
+
+
+```
+
+
+```{r} 
+
+training= data.frame(allData2years[1])
+training=training[,1:38]
+test= data.frame(allData2years[2])
+test=test[,1:38]
+
+```
+Before we start, we’ll first remove the variables related to hot flashes and sensitive breasts as these are not to be included upon request by collaborators.
+```{r}
+
+training = training[,-grep("epic26_22_opvliegers1", names(training))]
+training = training[,-grep("epic26_23_gevoeligeborsten1", names(training))]
+
+test = test[,-grep("epic26_22_opvliegers1", names(test))]
+test = test[,-grep("epic26_23_gevoeligeborsten1", names(test))]
+
+```
+First we recreate the training and test set with only the input variables and the outcome we want, in this case *“epic26_1_urineverlies2”. We’ll also remove the outcome data that we’re not interested in right now from the training and test set.
+
+
+```{r}
+outcomeTraining = allData2years[[1]]$epic26_1_urineverlies3
+outcomeTest = allData2years[[2]]$epic26_1_urineverlies3
+```
+
+Now we’ll make our binary data set
+
+
+```{r}
+
+#convert to binary
+BinaryoutcomeTest<-ifelse(outcomeTest<5, "1","0")
+BinaryoutcomeTraining<-ifelse(outcomeTraining<5, "1","0")
+
+#convert to factor
+BinaryoutcomeTraining=as.numeric(BinaryoutcomeTraining)
+BinaryoutcomeTest=as.factor(BinaryoutcomeTest)
+
+```
+
+Prediction after Upsampling of the smaller dataset
+Upsampling on class 2 (patients with problems) on train data
+
+
+```{r}
+
+#Upsampling
+
+library(smotefamily)
+trainingSet2 <- data.frame(cbind(training,BinaryoutcomeTraining))
+trainingSet2$BinaryoutcomeTraining <- as.factor(trainingSet2$BinaryoutcomeTraining)
+smote <- smotefamily::SMOTE(trainingSet2[,-which(colnames(trainingSet2) == "BinaryoutcomeTraining")], trainingSet2$BinaryoutcomeTraining, K=5, dup_size = 1)
+datasmote=smote$data
+table(datasmote$class)
+
+SMOTE2BinaryOutcomeTraining = (datasmote[,c(37)])
+SMOTE2OutcomeTraining = (datasmote[,c(37)])
+
+SMOTE2TrainingSet = datasmote[,-c(37)]
+SMOTE2BinaryOutcomeTraining<-as.factor(SMOTE2BinaryOutcomeTraining)
+SMOTE2OutcomeTraining<-as.factor(SMOTE2BinaryOutcomeTraining)
+
+```
+
+
+
+
+```{r}
+
+#Run RFE after upsampling
+# result_rfeupsampling <- rfe(x = SMOTE2TrainingSet,
+#                    y = SMOTE2BinaryOutcomeTraining,
+#                    sizes = c(1:36),
+#                    rfeControl = control)
+# saveRDS(result_rfeupsampling, paste(getwd(), "/rfeResults_RandomForestUIUpsampling-2year.rds", sep = ""))
+RFProfile<-readRDS("C:/Users/hajar.hasannejadasl/Documents/prospect2022/TestRF/rfeResults_RandomForestUIUpsampling-2year.rds")
+        
+# Print the results
+RFProfile
+
+# Print the selected features
+predictors(RFProfile)
+
+# Print the results visually
+ggplot(data = RFProfile, metric = "Accuracy") + theme_bw()
+ggplot(data = RFProfile, metric = "Kappa") + theme_bw()
+```
+
+```{r}
+#ChosenModel
+chosenmodelvariables<-RFProfile$optVariables[1:9]
+chosenmodelvariables
+newdataset<-SMOTE2TrainingSet[c(chosenmodelvariables)]
+#train with chosen variables
+set.seed(350)
+
+# finalmodel <- randomForest(SMOTE2BinaryOutcomeTraining ~ ., data=newdataset, ntree=3000, proximity=TRUE)
+#Save model
+# saveRDS(finalmodel, paste(getwd(), "RFUI2year.rds"))
+finalmodel<-readRDS("C:/Users/hajar.hasannejadasl/Documents/prospect2022/TestRF RFUI2year.rds")
+
+
+
+```
+```{r}
+#performance metrics for test
+
+predict_RF <- predict(finalmodel, test,na.action = na.pass)
+confusionMatrix(table(predict_RF, BinaryoutcomeTest))
+
+#ROC plot
+test_probRF = predict(finalmodel, test, type = "prob")
+roc_RF_one <- roc(BinaryoutcomeTest, as.vector(test_probRF[,1]))
+
+plot(roc_RF_one, col = "darkgreen",lty = 1,cex.lab=1.5, cex.axis=1.5, lwd = 3, print.auc=TRUE)
+
+
+
+```
+```{r}
+  
+  #Extract var important from the model, calculate percentages, put them in a range between 0-1
+imp <- (varImp(finalmodel))
+perc<- (imp/sum(imp)*100)
+perc<-round(perc)
+overal<-round(perc/max(perc), digit=2)
+
+#create a dataframe for var impotance
+varimp_data <- data.frame(feature = row.names(varImp(finalmodel)),
+                          importance = varImp(finalmodel)[, 1])
+
+#calculate percenrages
+varimp_data$percentage<-perc
+
+#sort based on importance
+varimp_data<- varimp_data[order(varimp_data$importance, decreasing = TRUE),]
+
+#Rename feature
+varimp_data$feature<- c("PSA", "Age", "Treatment", "sCT", "Leaking urine", "Need to UF", "Urinary function", "Urinary control", "sCN")
+
+
+
+
+varimp_data$overal<-overal
+names(varimp_data)[3] <- "g"
+#plot
+ # plot dataframe
+  ggplot(varimp_data, aes(x = reorder(feature, importance), 
+                         y = importance)) +
+       coord_flip() +
+
+    geom_bar(stat='identity', fill="#229954") +
+    coord_flip() +
+      geom_text(aes(label = round(importance,1)), vjust=0, hjust=0, color="black", size=3) + 
+
+    theme_classic() +
+    labs(
+      x     = "Feature",
+      y     = "Importance",
+      title = "Feature Importance random forest 1-year"+
+        theme_bw()+theme(legend.position = "none")
+    )
+  
+  
+
+```
+
