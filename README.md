@@ -1,4 +1,4 @@
-# Code for the article called "A data-driven approach to predict urinary incontinence in men with localized prostate cancer"
+# Code for the article called "A comparison of machine learning models for predicting urinary incontinence in men with localized prostate cancer"
 This repo contains the code required to run the analyses described in the scientific article "A comparison of machine learning models for predicting urinary incontinence in men with localized prostate cancer" by H. Hasannejadasl et al.
 
 
